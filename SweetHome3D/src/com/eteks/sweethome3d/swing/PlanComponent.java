@@ -182,6 +182,7 @@ import com.eteks.sweethome3d.model.HomeDoorOrWindow;
 import com.eteks.sweethome3d.model.HomeFurnitureGroup;
 import com.eteks.sweethome3d.model.HomeLight;
 import com.eteks.sweethome3d.model.HomePieceOfFurniture;
+import com.eteks.sweethome3d.model.HomePrint;
 import com.eteks.sweethome3d.model.HomeTexture;
 import com.eteks.sweethome3d.model.Label;
 import com.eteks.sweethome3d.model.LengthUnit;
@@ -292,6 +293,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
   private Map<PlanController.EditableProperty, JFormattedTextField> toolTipEditableTextFields;
   private KeyListener                       toolTipKeyListener;
   
+  private final ThreadLocal<Level> printLevel = new ThreadLocal<Level>();
   private List<HomePieceOfFurniture>        sortedLevelFurniture;
   private List<Room>                        sortedLevelRooms;
   private Map<TextStyle, Font>              fonts;
@@ -1941,22 +1943,47 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * to make it fill <code>pageFormat</code> imageable size.
    */
   public float getPrintPreferredScale(Graphics g, PageFormat pageFormat) {
-    List<Selectable> printedItems = getPaintedItems(); 
-    Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
-    if (printedItemBounds != null) {
-      float imageableWidthCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableWidth() / 72);
-      float imageableHeightCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableHeight() / 72);
-      float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
-      // Compute the largest integer scale possible
-      int scaleInverse = (int)Math.ceil(Math.max(
-          (printedItemBounds.getWidth() + 2 * extraMargin) / imageableWidthCm,
-          (printedItemBounds.getHeight() + 2 * extraMargin) / imageableHeightCm));
-      return 1f / scaleInverse;
-    } else {
+    return getPrintPreferredScale(g, pageFormat, getPrintItems(this.home.getSelectedLevel()));
+  }
+
+  private float getPrintPreferredScale(Graphics g, PageFormat pageFormat, List<Selectable> items) {
+    Rectangle2D bounds = getItemsBounds(g, items);
+    if (bounds == null) {
       return 0;
     }
+    float width = LengthUnit.inchToCentimeter((float)pageFormat.getImageableWidth() / 72);
+    float height = LengthUnit.inchToCentimeter((float)pageFormat.getImageableHeight() / 72);
+    float margin = getStrokeWidthExtraMargin(items, PaintMode.PRINT);
+    double scaleInverse = Math.ceil(Math.max(
+        (bounds.getWidth() + 2 * margin) / width,
+        (bounds.getHeight() + 2 * margin) / height));
+    return (float)(1 / scaleInverse);
   }
-  
+
+  private List<Selectable> getPrintItems(Level level) {
+    List<Selectable> items = new ArrayList<Selectable>(getPaintedItems());
+    for (Iterator<Selectable> it = items.iterator(); it.hasNext(); ) {
+      Selectable item = it.next();
+      if (item instanceof Elevatable && !isViewableAtLevel((Elevatable)item, level)) {
+        it.remove();
+      }
+    }
+    return items;
+  }
+
+  float getPrintScale(Graphics g, PageFormat pageFormat, Level level) {
+    return getPrintScale(g, pageFormat, getPrintItems(level));
+  }
+
+  private float getPrintScale(Graphics g, PageFormat pageFormat, List<Selectable> items) {
+    float fitScale = getPrintPreferredScale(g, pageFormat, items);
+    HomePrint print = this.home.getPrint();
+    // A custom scale is reduced when necessary to keep the level on one page.
+    return print == null || print.getPlanScale() == null
+        ? fitScale
+        : Math.min(fitScale, print.getPlanScale());
+  }
+
   /**
    * Returns the margin that should be added around home items bounds to ensure their
    * line stroke width is always fully visible.
@@ -2004,77 +2031,67 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
   }
   
   /**
-   * Prints this component plan at the scale given in the home print attributes or at a scale 
-   * that makes it fill <code>pageFormat</code> imageable size if this attribute is <code>null</code>.
+   * Returns the viewable level at a plan page index, in home level order.
+   */
+  static Level getPrintLevel(Home home, int pageIndex) {
+    for (Level level : home.getLevels()) {
+      if (level.isViewable() && pageIndex-- == 0) {
+        return level;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Prints one plan page per viewable level.
    */
   public int print(Graphics g, PageFormat pageFormat, int pageIndex) {
-    List<Selectable> printedItems = getPaintedItems(); 
-    Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
-    if (printedItemBounds != null) {
-      double imageableX = pageFormat.getImageableX();
-      double imageableY = pageFormat.getImageableY();
-      double imageableWidth = pageFormat.getImageableWidth();
-      double imageableHeight = pageFormat.getImageableHeight();
-      float printScale;
-      float rowIndex;
-      float columnIndex;
-      int pagesPerRow;
-      int pagesPerColumn;
-      if (this.home.getPrint() == null || this.home.getPrint().getPlanScale() == null) {
-        // Compute a scale that ensures the plan will fill the component if plan scale is null
-        printScale = getPrintPreferredScale(g, pageFormat) * LengthUnit.centimeterToInch(72);
-        if (pageIndex > 0) {
-          return NO_SUCH_PAGE;
-        }
-        pagesPerRow = 1;
-        pagesPerColumn = 1;
-        rowIndex   = 0;
-        columnIndex = 0;
-      } else {
-        // Apply print scale to paper size expressed in 1/72nds of an inch
-        printScale = this.home.getPrint().getPlanScale().floatValue() * LengthUnit.centimeterToInch(72);
-        pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
-        if (printedItemBounds.getWidth() * printScale != imageableWidth) {
-          pagesPerRow++;
-        }
-        pagesPerColumn = (int)(printedItemBounds.getHeight() * printScale / imageableHeight);
-        if (printedItemBounds.getHeight() * printScale != imageableHeight) {
-          pagesPerColumn++;
-        }
-        if (pageIndex >= pagesPerRow * pagesPerColumn) {
-          return NO_SUCH_PAGE;
-        }
-        rowIndex = pageIndex / pagesPerRow;
-        columnIndex = pageIndex - rowIndex * pagesPerRow;
-      }
-          
-      Graphics2D g2D = (Graphics2D)g.create();
-      g2D.clip(new Rectangle2D.Double(imageableX, imageableY, imageableWidth, imageableHeight));
-      // Change coordinates system to paper imageable origin
-      g2D.translate(imageableX - columnIndex * imageableWidth, imageableY - rowIndex * imageableHeight);
-      g2D.scale(printScale, printScale);
-      float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
-      g2D.translate(-printedItemBounds.getMinX() + extraMargin,
-          -printedItemBounds.getMinY() + extraMargin);
-      // Center plan in component if possible
-      g2D.translate(Math.max(0, 
-              (imageableWidth * pagesPerRow / printScale - printedItemBounds.getWidth() - 2 * extraMargin) / 2), 
-          Math.max(0, 
-              (imageableHeight * pagesPerColumn / printScale - printedItemBounds.getHeight() - 2 * extraMargin) / 2));
-      setRenderingHints(g2D);
-      try {
-        // Print component contents
-        paintContent(g2D, printScale, PaintMode.PRINT);
-      } catch (InterruptedIOException ex) {
-        // Ignore exception because it may happen only in EXPORT paint mode 
-      }   
-      g2D.dispose();
-      return PAGE_EXISTS;
-    } else {
+    if (pageIndex < 0 || pageFormat.getImageableWidth() <= 0 || pageFormat.getImageableHeight() <= 0) {
       return NO_SUCH_PAGE;
     }
+    Level level = getPrintLevel(this.home, pageIndex);
+    boolean homeHasLevels = !this.home.getLevels().isEmpty();
+    if (level == null && (homeHasLevels || pageIndex != 0)) {
+      return NO_SUCH_PAGE;
+    }
+
+    List<Selectable> items = getPrintItems(level);
+    Rectangle2D bounds = getItemsBounds(g, items);
+    if (bounds == null) {
+      return homeHasLevels ? PAGE_EXISTS : NO_SUCH_PAGE;
+    }
+    float scale = getPrintScale(g, pageFormat, items) * LengthUnit.centimeterToInch(72);
+    if (!(scale > 0)) {
+      return NO_SUCH_PAGE;
+    }
+    double x = pageFormat.getImageableX();
+    double y = pageFormat.getImageableY();
+    double width = pageFormat.getImageableWidth();
+    double height = pageFormat.getImageableHeight();
+    Graphics2D graphics = (Graphics2D)g.create();
+    Level previousPrintLevel = this.printLevel.get();
+    try {
+      this.printLevel.set(level);
+      graphics.clip(new Rectangle2D.Double(x, y, width, height));
+      graphics.translate(x + (width - bounds.getWidth() * scale) / 2,
+          y + (height - bounds.getHeight() * scale) / 2);
+      graphics.scale(scale, scale);
+      graphics.translate(-bounds.getMinX(), -bounds.getMinY());
+      setRenderingHints(graphics);
+      paintContent(graphics, scale, PaintMode.PRINT);
+      return PAGE_EXISTS;
+    } catch (InterruptedIOException ex) {
+      return NO_SUCH_PAGE;
+    } finally {
+      if (previousPrintLevel == null) {
+        this.printLevel.remove();
+      } else {
+        this.printLevel.set(previousPrintLevel);
+      }
+      graphics.dispose();
+    }
   }
-  
+
   /**
    * Returns an image of the selected items displayed by this component 
    * (camera excepted) with no outline at scale 1/1 (1 pixel = 1cm).
@@ -2199,7 +2216,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * Paints background image and returns <code>true</code> if an image is painted.
    */
   private boolean paintBackgroundImage(Graphics2D g2D, PaintMode paintMode) {
-    Level selectedLevel = this.home.getSelectedLevel();
+    Level selectedLevel = getRenderingLevel();
     Level backgroundImageLevel = null;
     if (selectedLevel != null) { 
       // Search the first level at same elevation with a background image
@@ -2245,7 +2262,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
         if (!prepareBackgroundImageWithAlphaInMemory) {
           oldComposite = setTransparency(g2D, 0.7f);
         }
-        g2D.drawImage(this.backgroundImageCache != null
+        g2D.drawImage(paintMode != PaintMode.PRINT && this.backgroundImageCache != null
             ? this.backgroundImageCache
             : readBackgroundImage(backgroundImage.getImage(), prepareBackgroundImageWithAlphaInMemory), 0, 0, this);
         if (!prepareBackgroundImageWithAlphaInMemory) {
@@ -2669,15 +2686,16 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
                                 Color backgroundColor, Color foregroundColor, PaintMode paintMode) throws InterruptedIOException {
     Graphics2D g2D = (Graphics2D)g;
     List<Selectable> selectedItems = this.home.getSelectedItems();
-    if (this.sortedLevelFurniture == null) {
+    List<HomePieceOfFurniture> furniture = paintMode == PaintMode.PRINT ? null : this.sortedLevelFurniture;
+    if (furniture == null) {
       // Sort home furniture in elevation order
-      this.sortedLevelFurniture = new ArrayList<HomePieceOfFurniture>();
+      furniture = new ArrayList<HomePieceOfFurniture>();
       for (HomePieceOfFurniture piece : this.home.getFurniture()) {
         if (isViewableAtSelectedLevel(piece)) {
-          this.sortedLevelFurniture.add(piece);
+          furniture.add(piece);
         }
       }
-      Collections.sort(this.sortedLevelFurniture,
+      Collections.sort(furniture,
           new Comparator<HomePieceOfFurniture>() {
             public int compare(HomePieceOfFurniture piece1, HomePieceOfFurniture piece2) {
               return Float.compare(piece1.getGroundElevation(), piece2.getGroundElevation());
@@ -2685,6 +2703,11 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
           });
     }    
     
+    if (paintMode != PaintMode.PRINT) {
+      this.sortedLevelFurniture = furniture;
+    }
+    List<Room> rooms = getSortedRooms(paintMode);
+
     Color selectionColor = getSelectionColor(); 
     Paint selectionOutlinePaint = new Color(selectionColor.getRed(), selectionColor.getGreen(), 
         selectionColor.getBlue(), 128);
@@ -2699,13 +2722,13 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     paintCompass(g2D, selectedItems, planScale, foregroundColor, paintMode);
 
     checkCurrentThreadIsntInterrupted(paintMode);
-    paintRooms(g2D, selectedItems, planScale, foregroundColor, paintMode);
+    paintRooms(g2D, rooms, selectedItems, planScale, foregroundColor, paintMode);
 
     checkCurrentThreadIsntInterrupted(paintMode);
     paintWalls(g2D, selectedItems, planScale, backgroundColor, foregroundColor, paintMode);
     
     checkCurrentThreadIsntInterrupted(paintMode);
-    paintFurniture(g2D, this.sortedLevelFurniture, selectedItems, 
+    paintFurniture(g2D, furniture, selectedItems,
         planScale, backgroundColor, foregroundColor, getFurnitureOutlineColor(), paintMode, true);
     
     checkCurrentThreadIsntInterrupted(paintMode);
@@ -2719,10 +2742,10 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     
     // Paint rooms text, furniture name and labels last to ensure they are not hidden
     checkCurrentThreadIsntInterrupted(paintMode);
-    paintRoomsNameAndArea(g2D, selectedItems, planScale, foregroundColor, paintMode);
+    paintRoomsNameAndArea(g2D, rooms, selectedItems, planScale, foregroundColor, paintMode);
 
     checkCurrentThreadIsntInterrupted(paintMode);
-    paintFurnitureName(g2D, this.sortedLevelFurniture, selectedItems, planScale, foregroundColor, paintMode);
+    paintFurnitureName(g2D, furniture, selectedItems, planScale, foregroundColor, paintMode);
 
     checkCurrentThreadIsntInterrupted(paintMode);
     paintLabels(g2D, this.home.getLabels(), selectedItems, selectionOutlinePaint, dimensionLinesSelectionOutlineStroke, 
@@ -2775,20 +2798,17 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     return new Color((getForeground().getRGB() & 0xFFFFFF) | 0x55000000, true);
   }
   
-  /**
-   * Paints rooms. 
-   */
-  private void paintRooms(Graphics2D g2D, List<Selectable> selectedItems, float planScale, 
-                          Color foregroundColor, PaintMode paintMode) {
-    if (this.sortedLevelRooms == null) {
+  private List<Room> getSortedRooms(PaintMode paintMode) {
+    List<Room> rooms = paintMode == PaintMode.PRINT ? null : this.sortedLevelRooms;
+    if (rooms == null) {
       // Sort home rooms in floor / floor-ceiling / ceiling order
-      this.sortedLevelRooms = new ArrayList<Room>();
+      rooms = new ArrayList<Room>();
       for (Room room : this.home.getRooms()) {
         if (isViewableAtSelectedLevel(room)) {
-          this.sortedLevelRooms.add(room);
+          rooms.add(room);
         }
       }
-      Collections.sort(this.sortedLevelRooms,
+      Collections.sort(rooms,
           new Comparator<Room>() {
             public int compare(Room room1, Room room2) {
               if (room1.isFloorVisible() == room2.isFloorVisible()
@@ -2804,12 +2824,23 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
           });
     }
     
+    if (paintMode != PaintMode.PRINT) {
+      this.sortedLevelRooms = rooms;
+    }
+    return rooms;
+  }
+
+  /**
+   * Paints rooms.
+   */
+  private void paintRooms(Graphics2D g2D, List<Room> rooms, List<Selectable> selectedItems, float planScale,
+                          Color foregroundColor, PaintMode paintMode) {
     Color defaultFillPaint = paintMode == PaintMode.PRINT 
         ? Color.WHITE
         : Color.GRAY;
     // Draw rooms area
     g2D.setStroke(new BasicStroke(getStrokeWidth(Room.class, paintMode) / planScale));
-    for (Room room : this.sortedLevelRooms) { 
+    for (Room room : rooms) {
       boolean selectedRoom = selectedItems.contains(room);
       // In clipboard paint mode, paint room only if it is selected
       if (paintMode != PaintMode.CLIPBOARD
@@ -2965,11 +2996,11 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
   /**
    * Paints rooms name and area. 
    */
-  private void paintRoomsNameAndArea(Graphics2D g2D, List<Selectable> selectedItems, float planScale, 
+  private void paintRoomsNameAndArea(Graphics2D g2D, List<Room> rooms, List<Selectable> selectedItems, float planScale,
                                      Color foregroundColor, PaintMode paintMode) {
     g2D.setPaint(foregroundColor);
     Font previousFont = g2D.getFont();
-    for (Room room : this.sortedLevelRooms) { 
+    for (Room room : rooms) {
       boolean selectedRoom = selectedItems.contains(room);
       // In clipboard paint mode, paint room only if it is selected
       if (paintMode != PaintMode.CLIPBOARD
@@ -3074,7 +3105,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
     // Draw rooms area
     g2D.setPaint(foregroundColor);
     g2D.setStroke(new BasicStroke(getStrokeWidth(Room.class, PaintMode.PAINT) / planScale));
-    for (Room room : rooms) { 
+    for (Room room : rooms) {
       if (isViewableAtSelectedLevel(room)) {
         g2D.draw(getShape(room.getPoints(), true));
       }
@@ -3273,7 +3304,9 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
                           Color backgroundColor, Color foregroundColor, PaintMode paintMode) {
     Collection<Wall> paintedWalls;
     Map<Collection<Wall>, Area> wallAreas;
-    if (paintMode != PaintMode.CLIPBOARD) {
+    if (paintMode == PaintMode.PRINT) {
+      wallAreas = getWallAreas(getDrawableWallsInSelectedLevel(this.home.getWalls()));
+    } else if (paintMode != PaintMode.CLIPBOARD) {
       wallAreas = getWallAreas();
     } else {
       // In clipboard paint mode, paint only selected walls
@@ -3426,10 +3459,17 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * Returns <code>true</code> if the given item can be viewed in the plan at the selected level. 
    */
   private boolean isViewableAtSelectedLevel(Elevatable item) {
+    return isViewableAtLevel(item, getRenderingLevel());
+  }
+
+  private Level getRenderingLevel() {
+    Level level = this.printLevel.get();
+    return level == null ? this.home.getSelectedLevel() : level;
+  }
+
+  private boolean isViewableAtLevel(Elevatable item, Level selectedLevel) {
     Level level = item.getLevel();
-    return level == null
-        || (level.isViewable()
-            && item.isAtLevel(this.home.getSelectedLevel()));
+    return level == null || (level.isViewable() && item.isAtLevel(selectedLevel));
   }
 
   /**
